@@ -55,8 +55,10 @@ def analyze(tf: str) -> None:
     if len(gaps) == 0:
         print(f" ギャップ(>{int(gap_th.total_seconds()/60):.0f}分): なし")
     else:
-        # ギャップ終端が月曜 → 週末を跨いでいる (正常)
-        is_weekend = gaps.index.day_of_week == 0
+        # 44h 超 = 週末 or 祝日休場 (正常)。USDJPY は日曜 22:xx UTC 開場なので
+        # 週末ギャップ終端は日曜夜になる = 曜日判定では拾えない。時間長で分類する。
+        WEEKEND_MIN = pd.Timedelta("44h")
+        is_weekend = gaps >= WEEKEND_MIN
         weekend_g  = gaps[is_weekend]
         trading_g  = gaps[~is_weekend]
 
