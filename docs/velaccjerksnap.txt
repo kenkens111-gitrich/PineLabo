@@ -1,0 +1,380 @@
+//@version=5
+strategy("【Verify v63.5 + Filters】Physics Matrix", shorttitle="Phys v63.5+F", overlay=false, calc_on_every_tick=true, process_orders_on_close=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// =============================================================================
+// 1. 設定
+// =============================================================================
+
+// --- 共通: 物理演算パラメータ ---
+grp_phys = "基本パラメータ (物理演算)"
+int len_smooth = input.int(6,   "平滑化 (Smooth)", minval=1, group=grp_phys)
+int len_hma    = input.int(72,  "中間ライン (HMA)", minval=1, group=grp_phys)
+int len_norm   = input.int(100, "正規化期間 (Norm)", minval=10, group=grp_phys)
+
+// --- 強制ドテン (Panic Mode) ---
+grp_force = "【強制ドテン】(Panic Mode)"
+bool use_force_entry   = input.bool(true, "強制ドテンを使用する", group=grp_force)
+float force_vel_thresh = input.float(2.0, "Vel閾値 (正規化値)", minval=0.1, step=0.1, group=grp_force)
+
+// --- トレンド方向マスク設定 ---
+grp_mask = "【トレンド方向マスク】(Direction Filter)"
+bool use_trend_mask      = input.bool(true, "バンド方向と逆のエントリーを禁止する", group=grp_mask)
+string mask_action       = input.string("見送り", "マスク時の挙動", options=["見送り", "待機"], group=grp_mask)
+string mask_src_type     = input.string("Close", "マスク用ソース", options=["Close", "Open", "High", "Low", "BodyMid (Open+Close)/2"], group=grp_mask)
+int mask_len_ma          = input.int(1,     "マスク用MA期間", group=grp_mask) 
+int mask_len_median      = input.int(144,   "バンド計測期間", group=grp_mask)
+float mask_width_coef    = input.float(3.0, "バンド幅係数", step=0.1, group=grp_mask)
+float mask_rope          = input.float(1.0, "不感帯 (Rope)", step=0.05, group=grp_mask)
+int mask_smooth          = input.int(1,     "慣性平滑化", minval=1, group=grp_mask)
+
+// --- 追加フィルター設定 (New) ---
+grp_filt = "【追加フィルター】MA & Vel"
+// MA Filter
+string opt_ma_type = input.string("なし", "MAフィルター動作 (HMA72+SMA72)", options=["なし", "禁止 (Ban)", "待機 (Wait)"], group=grp_filt)
+bool opt_ma_exit   = input.bool(false,    "・MA逆行で強制決済する", group=grp_filt)
+// Vel Filter
+string opt_vel_type = input.string("なし", "Vel閾値フィルター動作", options=["なし", "禁止 (Ban)", "待機 (Wait)"], group=grp_filt)
+float opt_vel_thresh = input.float(1.0,    "・Vel閾値 (範囲±)", step=0.1, group=grp_filt, tooltip="Velが -1.0～1.0 の間はエントリー制限")
+bool opt_vel_exit_allow = input.bool(false, "・Vel範囲内でも決済は許可", group=grp_filt)
+
+// --- A. エントリー条件 ---
+grp_in = "【エントリー条件】(Long基準)"
+in_v_slp  = input.string("無視", "Vel: 傾き", options=["上昇", "下降", "無視"], inline="in_v", group=grp_in)
+in_v_pol  = input.string("無視", "極性",      options=["正(+)", "負(-)", "無視"], inline="in_v", group=grp_in)
+in_a_slp  = input.string("無視", "Acc: 傾き", options=["上昇", "下降", "無視"], inline="in_a", group=grp_in)
+in_a_pol  = input.string("無視", "極性",      options=["正(+)", "負(-)", "無視"], inline="in_a", group=grp_in)
+in_a_hier = input.string("無視", "階層",      options=["Velより上", "Velより下", "無視"], inline="in_a", group=grp_in)
+in_j_slp  = input.string("上昇", "Jerk: 傾き", options=["上昇", "下降", "無視"], inline="in_j", group=grp_in)
+in_j_pol  = input.string("無視", "極性",      options=["正(+)", "負(-)", "無視"], inline="in_j", group=grp_in)
+in_j_hier = input.string("無視", "階層",      options=["Accより上", "Accより下", "無視"], inline="in_j", group=grp_in)
+in_s_slp  = input.string("上昇", "Snap: 傾き", options=["上昇", "下降", "無視"], inline="in_s", group=grp_in)
+in_s_pol  = input.string("無視", "極性",      options=["正(+)", "負(-)", "無視"], inline="in_s", group=grp_in)
+in_s_hier = input.string("無視", "階層",      options=["Jerkより上", "Jerkより下", "無視"], inline="in_s", group=grp_in)
+
+// --- B. 決済条件 ---
+grp_out = "【決済条件】(Long Exit基準)"
+bool use_exit_logic = input.bool(false, "カスタム決済条件を使用する", group=grp_out)
+out_v_slp  = input.string("無視", "Vel: 傾き", options=["上昇", "下降", "無視"], inline="out_v", group=grp_out)
+out_v_pol  = input.string("無視", "極性",      options=["正(+)", "負(-)", "無視"], inline="out_v", group=grp_out)
+out_a_slp  = input.string("無視", "Acc: 傾き", options=["上昇", "下降", "無視"], inline="out_a", group=grp_out)
+out_a_pol  = input.string("無視", "極性",      options=["正(+)", "負(-)", "無視"], inline="out_a", group=grp_out)
+out_a_hier = input.string("無視", "階層",      options=["Velより上", "Velより下", "無視"], inline="out_a", group=grp_out)
+out_j_slp  = input.string("無視", "Jerk: 傾き", options=["上昇", "下降", "無視"], inline="out_j", group=grp_out)
+out_j_pol  = input.string("無視", "極性",      options=["正(+)", "負(-)", "無視"], inline="out_j", group=grp_out)
+out_j_hier = input.string("無視", "階層",      options=["Accより上", "Accより下", "無視"], inline="out_j", group=grp_out)
+out_s_slp  = input.string("無視", "Snap: 傾き", options=["上昇", "下降", "無視"], inline="out_s", group=grp_out)
+out_s_pol  = input.string("無視", "極性",      options=["正(+)", "負(-)", "無視"], inline="out_s", group=grp_out)
+out_s_hier = input.string("無視", "階層",      options=["Jerkより上", "Jerkより下", "無視"], inline="out_s", group=grp_out)
+
+// --- 表示設定 ---
+grp_disp = "表示設定"
+bool wait_for_close = input.bool(true, "足の確定を待つ", group="実行設定")
+bool show_lines     = input.bool(true, "ラインを表示", group=grp_disp)
+bool show_bg        = input.bool(true, "勝敗背景を表示", group=grp_disp)
+bool show_mask_debug = input.bool(true, "マスク状態(緑/赤)を背景に表示", group=grp_disp)
+float box_top       = input.float(5.0,  "勝敗背景の上限 (Top)", group=grp_disp)
+float box_bottom    = input.float(-5.0, "勝敗背景の下限 (Bottom)", group=grp_disp)
+
+
+// =============================================================================
+// 2. 物理演算 & 正規化
+// =============================================================================
+f_hma(src, len) => ta.wma(2 * ta.wma(src, int(len/2)) - ta.wma(src, len), int(math.round(math.sqrt(len))))
+f_norm(src, len) =>
+    float dev = nz(ta.stdev(src, len))
+    dev != 0 ? src / dev : 0
+
+float src_smooth = f_hma(close, len_smooth)
+float mid_line   = f_hma(src_smooth, len_hma)
+
+float raw_vel  = mid_line - mid_line[1]
+float raw_acc  = raw_vel - raw_vel[1]
+float raw_jerk = raw_acc - raw_acc[1]
+float raw_snap = raw_jerk - raw_jerk[1]
+
+float n_vel  = f_norm(raw_vel,  len_norm)
+float n_acc  = f_norm(raw_acc,  len_norm)
+float n_jerk = f_norm(raw_jerk, len_norm)
+float n_snap = f_norm(raw_snap, len_norm)
+
+
+// =============================================================================
+// 3. マスク演算 (Mask Logic) & 追加フィルター
+// =============================================================================
+f_elastic_system(float src_ma, float src_raw, int len_med, float coef, float rope, int smooth) =>
+    float body_size = math.abs(close - open)
+    float median_body = ta.median(body_size, len_med)
+    float band_width = median_body * coef
+    
+    var float drag_point = na
+    if na(drag_point)
+        drag_point := src_ma
+    
+    float slack = band_width * rope
+    if src_ma > drag_point + slack
+        drag_point := src_ma - slack
+    else if src_ma < drag_point - slack
+        drag_point := src_ma + slack
+    
+    float ma_inertia = ta.sma(drag_point, smooth)
+    
+    // ステートマシン
+    var int state = 0
+    var float anchor = na
+    var float limit = na
+    
+    if not na(ma_inertia)
+        if na(anchor)
+            anchor := ma_inertia
+            limit  := ma_inertia - band_width
+            state := 1
+        else
+            if state == 1 // Bull
+                if ma_inertia > anchor
+                    anchor := ma_inertia
+                limit := anchor - band_width
+                
+                if ma_inertia < limit
+                    state := -1
+                    anchor := ma_inertia
+                    limit := anchor + band_width
+            else // Bear
+                if ma_inertia < anchor
+                    anchor := ma_inertia
+                limit := anchor + band_width
+                
+                if ma_inertia > limit
+                    state := 1
+                    anchor := ma_inertia
+                    limit := anchor - band_width
+
+    [state]
+
+// マスク用MA計算 (ソース選択)
+float custom_src = switch mask_src_type
+    "Close" => close
+    "Open" => open
+    "High" => high
+    "Low" => low
+    "BodyMid (Open+Close)/2" => (open + close) / 2
+    => close
+
+float mask_ma = ta.sma(custom_src, mask_len_ma)
+
+// 計算実行
+[mask_state] = f_elastic_system(mask_ma, mask_ma, mask_len_median, mask_width_coef, mask_rope, mask_smooth)
+
+// --- 追加フィルター計算 ---
+// 1. MA Filter
+float val_hma72 = ta.wma(2*ta.wma(close, 36) - ta.wma(close, 72), 8)
+float val_sma72 = ta.sma(close, 72)
+bool ma_trend_down = val_hma72 < val_hma72[1] and val_sma72 < val_sma72[1]
+bool ma_trend_up   = val_hma72 > val_hma72[1] and val_sma72 > val_sma72[1]
+
+// 2. Vel Filter (Dead Zone)
+bool vel_is_weak = math.abs(n_vel) < opt_vel_thresh
+
+// --- 統合判定 (Total Check) ---
+// Longに対する判定
+// 禁止条件: (マスクがBearかつ見送り) OR (MA禁止かつ下降) OR (Vel禁止かつ弱)
+bool is_long_ban = (use_trend_mask and mask_state == -1 and mask_action == "見送り") or (opt_ma_type == "禁止 (Ban)" and ma_trend_down) or (opt_vel_type == "禁止 (Ban)" and vel_is_weak)
+
+// 待機条件: 禁止ではなく、((マスクがBearかつ待機) OR (MA待機かつ下降) OR (Vel待機かつ弱))
+bool is_long_wait_cond = (use_trend_mask and mask_state == -1 and mask_action == "待機") or (opt_ma_type == "待機 (Wait)" and ma_trend_down) or (opt_vel_type == "待機 (Wait)" and vel_is_weak)
+bool is_long_wait = not is_long_ban and is_long_wait_cond
+
+// Shortに対する判定
+bool is_short_ban = (use_trend_mask and mask_state == 1 and mask_action == "見送り") or (opt_ma_type == "禁止 (Ban)" and ma_trend_up) or (opt_vel_type == "禁止 (Ban)" and vel_is_weak)
+
+bool is_short_wait_cond = (use_trend_mask and mask_state == 1 and mask_action == "待機") or (opt_ma_type == "待機 (Wait)" and ma_trend_up) or (opt_vel_type == "待機 (Wait)" and vel_is_weak)
+bool is_short_wait = not is_short_ban and is_short_wait_cond
+
+
+// =============================================================================
+// 4. 条件判定ロジック
+// =============================================================================
+check_layer_mirror(val, val_1, ref_val, slp_opt, pol_opt, hier_opt, is_inverse) =>
+    string target_slp = slp_opt
+    if is_inverse and slp_opt != "無視"
+        target_slp := slp_opt == "上昇" ? "下降" : "上昇"
+
+    bool ok_slp = true
+    if target_slp == "上昇"
+        ok_slp := val > val_1
+    else if target_slp == "下降"
+        ok_slp := val < val_1
+    
+    string target_pol = pol_opt
+    if is_inverse and pol_opt != "無視"
+        target_pol := pol_opt == "正(+)" ? "負(-)" : "正(+)"
+        
+    bool ok_pol = true
+    if target_pol == "正(+)"
+        ok_pol := val > 0
+    else if target_pol == "負(-)"
+        ok_pol := val < 0
+    
+    string target_hier = hier_opt
+    if is_inverse and hier_opt != "無視"
+        if str.contains(hier_opt, "より上")
+            target_hier := str.replace(hier_opt, "より上", "より下")
+        else if str.contains(hier_opt, "より下")
+            target_hier := str.replace(hier_opt, "より下", "より上")
+
+    bool ok_hier = true
+    if str.contains(target_hier, "より上")
+        ok_hier := val > ref_val
+    else if str.contains(target_hier, "より下")
+        ok_hier := val < ref_val
+        
+    ok_slp and ok_pol and ok_hier
+
+f_check_entry(is_inv) =>
+    bool o_v = check_layer_mirror(n_vel, n_vel[1], 0.0, in_v_slp, in_v_pol, "無視", is_inv)
+    bool o_a = check_layer_mirror(n_acc, n_acc[1], n_vel, in_a_slp, in_a_pol, in_a_hier, is_inv)
+    bool o_j = check_layer_mirror(n_jerk, n_jerk[1], n_acc, in_j_slp, in_j_pol, in_j_hier, is_inv)
+    bool o_s = check_layer_mirror(n_snap, n_snap[1], n_jerk, in_s_slp, in_s_pol, in_s_hier, is_inv)
+    o_v and o_a and o_j and o_s
+
+f_check_exit(is_inv) =>
+    if not use_exit_logic
+        false
+    else
+        bool o_v = check_layer_mirror(n_vel, n_vel[1], 0.0, out_v_slp, out_v_pol, "無視", is_inv)
+        bool o_a = check_layer_mirror(n_acc, n_acc[1], n_vel, out_a_slp, out_a_pol, out_a_hier, is_inv)
+        bool o_j = check_layer_mirror(n_jerk, n_jerk[1], n_acc, out_j_slp, out_j_pol, out_j_hier, is_inv)
+        bool o_s = check_layer_mirror(n_snap, n_snap[1], n_jerk, out_s_slp, out_s_pol, out_s_hier, is_inv)
+        o_v and o_a and o_j and o_s
+
+bool entry_long  = f_check_entry(false) 
+bool entry_short = f_check_entry(true)  
+bool exit_long   = f_check_exit(false)  
+bool exit_short  = f_check_exit(true)   
+bool force_long  = use_force_entry and (n_vel >= force_vel_thresh)
+bool force_short = use_force_entry and (n_vel <= -force_vel_thresh)
+
+
+// =============================================================================
+// 5. 売買実行 (Filters Integrated)
+// =============================================================================
+bool can_execute = (not wait_for_close) or barstate.isconfirmed
+
+var bool pending_long = false
+var bool pending_short = false
+
+// 反対シグナルで待機キャンセル
+if entry_short or force_short
+    pending_long := false
+if entry_long or force_long
+    pending_short := false
+
+// 待機中のBan条件発生チェック（待機中に禁止条件が成立したらキャンセル）
+if pending_long and is_long_ban
+    pending_long := false
+if pending_short and is_short_ban
+    pending_short := false
+
+
+if can_execute
+    // --- 0. MA逆行 & Vel決済オプション ---
+    if opt_ma_exit
+        if strategy.position_size > 0 and ma_trend_down
+            strategy.close("Long", comment="Exit(MA)")
+            pending_long := false
+        if strategy.position_size < 0 and ma_trend_up
+            strategy.close("Short", comment="Exit(MA)")
+            pending_short := false
+            
+    // Vel範囲内での決済許可 (新規追加)
+    // エントリーはブロックされるが、反対ポジションを持っていれば閉じる
+    if opt_vel_exit_allow and vel_is_weak
+        if strategy.position_size > 0 and (entry_short or force_short)
+            strategy.close("Long", comment="Exit(Vel)")
+        if strategy.position_size < 0 and (entry_long or force_long)
+            strategy.close("Short", comment="Exit(Vel)")
+
+    // --- A. 強制ドテン (Force Entry) ---
+    if force_long
+        if not is_long_ban and not is_long_wait
+            strategy.entry("Long", strategy.long, comment="Force L")
+            pending_long := false
+        else if is_long_wait
+            pending_long := true 
+            
+    else if force_short
+        if not is_short_ban and not is_short_wait
+            strategy.entry("Short", strategy.short, comment="Force S")
+            pending_short := false
+        else if is_short_wait
+            pending_short := true
+    
+    // --- B. 通常エントリー (Normal Entry) ---
+    else
+        if entry_long
+            if not is_long_ban and not is_long_wait
+                strategy.entry("Long", strategy.long, comment="Entry L")
+                pending_long := false
+            else if is_long_wait
+                pending_long := true
+        
+        if entry_short
+            if not is_short_ban and not is_short_wait
+                strategy.entry("Short", strategy.short, comment="Entry S")
+                pending_short := false
+            else if is_short_wait
+                pending_short := true
+
+    // --- C. 待機発動 (Wait Trigger) ---
+    // すべての禁止/待機条件が解除されたら発動
+    if pending_long and not is_long_ban and not is_long_wait
+        strategy.entry("Long", strategy.long, comment="Wait L")
+        pending_long := false
+        
+    if pending_short and not is_short_ban and not is_short_wait
+        strategy.entry("Short", strategy.short, comment="Wait S")
+        pending_short := false
+
+    // --- D. カスタム決済 ---
+    if strategy.position_size > 0 and exit_long and not entry_short and not pending_short
+        strategy.close("Long", comment="Exit L")
+        
+    if strategy.position_size < 0 and exit_short and not entry_long and not pending_long
+        strategy.close("Short", comment="Exit S")
+
+
+// =============================================================================
+// 6. 描画
+// =============================================================================
+plot(show_lines ? n_vel : na,  "Vel",  color=color.green, linewidth=2)
+plot(show_lines ? n_acc : na,  "Acc",  color=color.orange, linewidth=2)
+plot(show_lines ? n_jerk : na, "Jerk", color=color.aqua, linewidth=1)
+plot(show_lines ? n_snap : na, "Snap", color=color.fuchsia, linewidth=1)
+
+plot(use_force_entry and show_lines ? force_vel_thresh : na, "Force High", color=color.new(color.gray, 50), style=plot.style_circles)
+plot(use_force_entry and show_lines ? -force_vel_thresh : na, "Force Low", color=color.new(color.gray, 50), style=plot.style_circles)
+
+// MAフィルター用ライン (表示リクエスト対応)
+plot(show_lines ? val_hma72 : na, "HMA72", color=color.new(color.orange, 50), linewidth=1, display=display.none) // デフォルト非表示
+plot(show_lines ? val_sma72 : na, "SMA72", color=color.new(color.blue, 50), linewidth=1, display=display.none)
+
+hline(0, "Zero", color.gray)
+
+color mask_bg = na
+if show_mask_debug and use_trend_mask
+    if mask_state == 1
+        mask_bg := color.new(color.green, 90) // Bull (Short Blocked)
+    else if mask_state == -1
+        mask_bg := color.new(color.red, 90)   // Bear (Long Blocked)
+
+bgcolor(mask_bg, title="Trend Mask BG")
+
+plotshape(pending_long,  style=shape.circle, location=location.bottom, color=color.yellow, size=size.tiny, title="Pending L")
+plotshape(pending_short, style=shape.circle, location=location.top,    color=color.yellow, size=size.tiny, title="Pending S")
+
+if show_bg and strategy.closedtrades > strategy.closedtrades[1]
+    int trade_idx = strategy.closedtrades - 1
+    float profit = strategy.closedtrades.profit(trade_idx)
+    int start_time = strategy.closedtrades.entry_time(trade_idx)
+    int end_time   = strategy.closedtrades.exit_time(trade_idx)
+    color box_col = profit > 0 ? color.new(color.green, 85) : profit < 0 ? color.new(color.red, 85) : color.new(color.gray, 85)
+    box.new(left=start_time, top=box_top, right=end_time, bottom=box_bottom, xloc=xloc.bar_time, border_width=0, bgcolor=box_col)

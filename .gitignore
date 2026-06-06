@@ -1,0 +1,22 @@
+# データ（CLAUDE.md 方針: ヒストリカルは追跡しない）
+data/
+
+# 出力（図・大きな結果テーブル。必要に応じて緩める）
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Claude Code のローカル個人設定
+.claude/settings.local.json
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
