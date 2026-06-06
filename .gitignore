@@ -8,6 +8,7 @@ outputs/
 __pycache__/
 *.py[cod]
 .venv/
+*.egg-info/
 venv/
 env/
 .ipynb_checkpoints/
