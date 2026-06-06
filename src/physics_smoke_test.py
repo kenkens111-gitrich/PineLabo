@@ -12,6 +12,7 @@ Physics Matrix — Pine→Python 翻訳 + 軸1分析 雛形 (スモークテス�
 """
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from sklearn.tree import DecisionTreeClassifier, export_text
 
 RNG = np.random.default_rng(7)
@@ -107,7 +108,16 @@ def tree_rules(feat: pd.DataFrame, label: pd.Series, max_depth=3, min_leaf=50):
     return export_text(clf, feature_names=list(feat.columns))
 
 # =============================================================================
-# 5. 合成データ (momentum バーストを埋め込み、大move が存在する系列)
+# 5. 実データローダ
+# =============================================================================
+def load_real_data() -> pd.DataFrame:
+    """data/USDJPY_M1.parquet を読み込む (open/high/low/close, UTC インデックス)"""
+    path = Path(__file__).resolve().parent.parent / "data" / "USDJPY_M1.parquet"
+    return pd.read_parquet(path, columns=["open", "high", "low", "close"])
+
+
+# =============================================================================
+# 5b. 合成データ (配線確認用フォールバック)
 # =============================================================================
 def synth_prices(n=30000):
     drift = np.zeros(n)
@@ -130,7 +140,8 @@ def synth_prices(n=30000):
 # 実行
 # =============================================================================
 if __name__ == "__main__":
-    df = synth_prices()
+    df = load_real_data()
+
     phys = compute_physics(df)
     atr_s = atr(df, 14)
     feat = make_features(phys)
@@ -140,11 +151,11 @@ if __name__ == "__main__":
     feat_v, label_v = feat[valid], label[valid].astype(int)
 
     print("=" * 70)
-    print("[1] Pine→Python 翻訳チェック")
+    print("[1] Pine→Python 翻訳チェック (実データ: USDJPY M1)")
     print("=" * 70)
+    print(f"期間: {df.index[0].date()} → {df.index[-1].date()}  全{len(df):,}バー / 有効{valid.sum():,}バー")
     print(phys[valid].describe().round(3).T[["mean", "std", "min", "max"]])
-    print(f"\n有効バー数: {valid.sum()} / {len(df)}  (HMA/正規化のウォームアップ分を除外)")
-    print(f"大move(今後20本で1.5ATR超上昇) 発生率 = {label_v.mean():.3%}  ← これがベースライン")
+    print(f"\n大move(今後20本で1.5ATR超上昇) 発生率 = {label_v.mean():.3%}  ← これがベースライン")
 
     print("\n" + "=" * 70)
     print("[2] 軸1: 条件付き発生率テーブル (lift順・全件表示・足切りは印のみ)")
